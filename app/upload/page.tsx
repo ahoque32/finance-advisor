@@ -6,12 +6,16 @@ import { Nav } from "@/components/nav";
 export default function UploadPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [result, setResult] = useState<{
     success?: boolean;
     inserted?: number;
+    imported?: number;
     skipped?: number;
     errors?: string[];
     error?: string;
+    message?: string;
+    totalAvailable?: number;
   } | null>(null);
 
   const uploadFile = async (file: File) => {
@@ -33,6 +37,35 @@ export default function UploadPage() {
       setResult({ error: "Upload failed. Please try again." });
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  const importFromPlaid = async () => {
+    setIsImporting(true);
+    setResult(null);
+
+    try {
+      const res = await fetch("/api/plaid/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setResult({
+          success: true,
+          imported: data.imported,
+          totalAvailable: data.totalAvailable,
+          message: data.message,
+        });
+      } else {
+        setResult({ error: data.error || "Failed to import from bank" });
+      }
+    } catch {
+      setResult({ error: "Failed to connect to bank. Please try again." });
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -151,6 +184,52 @@ export default function UploadPage() {
               )}
             </div>
           )}
+
+          {/* Result for Plaid import */}
+          {result && result.imported !== undefined && (
+            <div className="mt-6">
+              <div className="glass rounded-xl p-4 border-green-500/30">
+                <p className="text-green-400 font-medium mb-1">
+                  ✅ Bank import successful!
+                </p>
+                <p className="text-sm text-zinc-400">
+                  {result.imported} transactions imported from bank
+                  {result.totalAvailable ? ` (${result.totalAvailable} available)` : ""}
+                </p>
+                {result.message && (
+                  <p className="text-sm text-zinc-500 mt-1">{result.message}</p>
+                )}
+                <a
+                  href="/transactions"
+                  className="inline-block mt-3 text-sm text-blue-400 hover:text-blue-300"
+                >
+                  View transactions →
+                </a>
+              </div>
+            </div>
+          )}
+
+          {/* Import from Bank */}
+          <div className="glass rounded-xl p-4 mt-6">
+            <h3 className="font-medium mb-2 text-sm">🏦 Import from Bank</h3>
+            <p className="text-xs text-zinc-500 mb-3">
+              Import your last 90 days of transactions directly from your linked bank account.
+            </p>
+            <button
+              onClick={importFromPlaid}
+              disabled={isImporting}
+              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+            >
+              {isImporting ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  Importing...
+                </>
+              ) : (
+                <>🏦 Import from Bank</>
+              )}
+            </button>
+          </div>
 
           {/* CSV Format help */}
           <div className="glass rounded-xl p-4 mt-6">
