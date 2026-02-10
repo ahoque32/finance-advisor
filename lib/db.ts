@@ -38,5 +38,7 @@ function initializeSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
     CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category);
     CREATE INDEX IF NOT EXISTS idx_transactions_name ON transactions(name);
+    CREATE INDEX IF NOT EXISTS idx_transactions_account_mask ON transactions(account_mask);
+    CREATE INDEX IF NOT EXISTS idx_transactions_account_name ON transactions(account_name);
   `);
 }

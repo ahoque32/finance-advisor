@@ -31,6 +31,22 @@ export interface MerchantFrequency {
   avg: number;
 }
 
+export interface AccountInfo {
+  account_name: string;
+  account_mask: string;
+  transaction_count: number;
+  total_spending: number;
+  total_income: number;
+}
+
+export interface AccountSpending {
+  account_name: string;
+  account_mask: string;
+  category: string;
+  total: number;
+  count: number;
+}
+
 export interface Subscription {
   name: string;
   amount: number;
@@ -229,4 +245,275 @@ export function getSummary(): {
     totalIncome: stats.totalIncome || 0,
     dateRange: stats.minDate ? { min: stats.minDate, max: stats.maxDate! } : null,
   };
+}
+
+// ============================================================
+// Account-specific queries
+// ============================================================
+
+/**
+ * Get all unique accounts with their spending/income totals.
+ */
+export function getAccounts(): AccountInfo[] {
+  const db = getDb();
+  return db.prepare(`
+    SELECT
+      account_name,
+      account_mask,
+      COUNT(*) as transaction_count,
+      SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as total_spending,
+      SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as total_income
+    FROM transactions
+    WHERE account_name != '' OR account_mask != ''
+    GROUP BY account_name, account_mask
+    ORDER BY transaction_count DESC
+  `).all() as AccountInfo[];
+}
+
+/**
+ * Resolve an account reference (name fragment or mask) to an exact (account_name, account_mask) pair.
+ * Returns null if no match, or an array if ambiguous.
+ */
+export function resolveAccount(ref: string): AccountInfo | AccountInfo[] | null {
+  const accounts = getAccounts();
+  if (accounts.length === 0) return null;
+
+  const q = ref.toLowerCase().trim();
+
+  // Try exact mask match first (e.g., "3903")
+  const maskMatch = accounts.filter(
+    (a) => a.account_mask === q || a.account_mask?.endsWith(q)
+  );
+  if (maskMatch.length === 1) return maskMatch[0];
+
+  // Try name match (case-insensitive partial)
+  const nameMatch = accounts.filter(
+    (a) => a.account_name.toLowerCase().includes(q)
+  );
+  if (nameMatch.length === 1) return nameMatch[0];
+
+  // Combined — if mask or name matched something unique together
+  const combined = [...new Set([...maskMatch, ...nameMatch])];
+  if (combined.length === 1) return combined[0];
+  if (combined.length > 1) return combined; // ambiguous
+
+  return null;
+}
+
+/**
+ * Get spending summary for a specific account (by mask or name).
+ */
+export function getAccountSummary(
+  accountName: string,
+  accountMask: string,
+  startDate?: string,
+  endDate?: string
+): {
+  totalSpending: number;
+  totalIncome: number;
+  transactionCount: number;
+  dateRange: { min: string; max: string } | null;
+} {
+  const db = getDb();
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (accountName) {
+    conditions.push("account_name = ?");
+    params.push(accountName);
+  }
+  if (accountMask) {
+    conditions.push("account_mask = ?");
+    params.push(accountMask);
+  }
+  if (startDate) {
+    conditions.push("date >= ?");
+    params.push(startDate);
+  }
+  if (endDate) {
+    conditions.push("date <= ?");
+    params.push(endDate);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const stats = db.prepare(`
+    SELECT
+      COUNT(*) as transactionCount,
+      SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as totalSpending,
+      SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as totalIncome,
+      MIN(date) as minDate,
+      MAX(date) as maxDate
+    FROM transactions
+    ${where}
+  `).get(...params) as {
+    transactionCount: number;
+    totalSpending: number;
+    totalIncome: number;
+    minDate: string | null;
+    maxDate: string | null;
+  };
+
+  return {
+    transactionCount: stats.transactionCount,
+    totalSpending: stats.totalSpending || 0,
+    totalIncome: stats.totalIncome || 0,
+    dateRange: stats.minDate ? { min: stats.minDate, max: stats.maxDate! } : null,
+  };
+}
+
+/**
+ * Get spending by category for a specific account.
+ */
+export function getAccountSpendingByCategory(
+  accountName: string,
+  accountMask: string,
+  startDate?: string,
+  endDate?: string
+): CategorySpending[] {
+  const db = getDb();
+  const conditions: string[] = ["amount > 0"];
+  const params: (string | number)[] = [];
+
+  if (accountName) {
+    conditions.push("account_name = ?");
+    params.push(accountName);
+  }
+  if (accountMask) {
+    conditions.push("account_mask = ?");
+    params.push(accountMask);
+  }
+  if (startDate) {
+    conditions.push("date >= ?");
+    params.push(startDate);
+  }
+  if (endDate) {
+    conditions.push("date <= ?");
+    params.push(endDate);
+  }
+
+  const where = `WHERE ${conditions.join(" AND ")}`;
+
+  return db.prepare(`
+    SELECT category, SUM(amount) as total, COUNT(*) as count
+    FROM transactions
+    ${where}
+    GROUP BY category
+    ORDER BY total DESC
+  `).all(...params) as CategorySpending[];
+}
+
+/**
+ * Get monthly totals for a specific account.
+ */
+export function getAccountMonthlyTotals(
+  accountName: string,
+  accountMask: string,
+  months?: number
+): MonthlyTotal[] {
+  const db = getDb();
+  const limit = months || 12;
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (accountName) {
+    conditions.push("account_name = ?");
+    params.push(accountName);
+  }
+  if (accountMask) {
+    conditions.push("account_mask = ?");
+    params.push(accountMask);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  return db.prepare(`
+    SELECT
+      strftime('%Y-%m', date) as month,
+      SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as income,
+      SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as expenses,
+      SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE -amount END) as net
+    FROM transactions
+    ${where}
+    GROUP BY strftime('%Y-%m', date)
+    ORDER BY month DESC
+    LIMIT ?
+  `).all(...params, limit) as MonthlyTotal[];
+}
+
+/**
+ * Get spending breakdown per account (for "show spending by account" queries).
+ */
+export function getSpendingByAccount(startDate?: string, endDate?: string): AccountInfo[] {
+  const db = getDb();
+  const conditions: string[] = [];
+  const params: string[] = [];
+
+  if (startDate) {
+    conditions.push("date >= ?");
+    params.push(startDate);
+  }
+  if (endDate) {
+    conditions.push("date <= ?");
+    params.push(endDate);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  return db.prepare(`
+    SELECT
+      account_name,
+      account_mask,
+      COUNT(*) as transaction_count,
+      SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as total_spending,
+      SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as total_income
+    FROM transactions
+    ${where}
+    GROUP BY account_name, account_mask
+    ORDER BY total_spending DESC
+  `).all(...params) as AccountInfo[];
+}
+
+/**
+ * Get recent transactions for a specific account.
+ */
+export function getAccountTransactions(
+  accountName: string,
+  accountMask: string,
+  options?: {
+    startDate?: string;
+    endDate?: string;
+    limit?: number;
+  }
+): Transaction[] {
+  const db = getDb();
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (accountName) {
+    conditions.push("account_name = ?");
+    params.push(accountName);
+  }
+  if (accountMask) {
+    conditions.push("account_mask = ?");
+    params.push(accountMask);
+  }
+  if (options?.startDate) {
+    conditions.push("date >= ?");
+    params.push(options.startDate);
+  }
+  if (options?.endDate) {
+    conditions.push("date <= ?");
+    params.push(options.endDate);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = options?.limit || 20;
+
+  return db.prepare(`
+    SELECT * FROM transactions
+    ${where}
+    ORDER BY date DESC, name ASC
+    LIMIT ?
+  `).all(...params, limit) as Transaction[];
 }
